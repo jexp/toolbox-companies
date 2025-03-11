@@ -1,9 +1,6 @@
-import json
 import os
-import asyncio
 
 import inspect
-from typing import Annotated, TypedDict, Literal
 from typing import Callable, TypeVar
 
 from dotenv import load_dotenv
@@ -15,12 +12,8 @@ from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_community.callbacks.streamlit import StreamlitCallbackHandler
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_core.tools import tool, StructuredTool
 from langchain_google_vertexai import ChatVertexAI
 
-from langgraph.prebuilt import ToolNode
-from langgraph.graph import START, StateGraph
-from langgraph.graph.message import AnyMessage, add_messages
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -98,83 +91,35 @@ def get_streamlit_cb(parent_container: DeltaGenerator) -> BaseCallbackHandler:
     # Return the fully configured StreamlitCallbackHandler instance, now context-aware and integrated with any ChatLLM
     return st_cb
 
-# This is the default state same as "MessageState" TypedDict but allows us accessibility to custom keys
-class GraphsState(TypedDict):
-    messages: Annotated[list[AnyMessage], add_messages]
-    # Custom keys for additional data can be added here such as - conversation_id: str
-
-graph = StateGraph(GraphsState)
-
-# Function to decide whether to continue tool usage or end the process
-def should_continue(state: GraphsState) -> Literal["tools", "__end__"]:
-    messages = state["messages"]
-    last_message = messages[-1]
-    if last_message.tool_calls:  # Check if the last message has any tool calls
-        return "tools"  # Continue to tool execution
-    return "__end__"  # End the conversation if no tool is needed
-
 # Load the tools from the Toolbox server
 client = ToolboxClient("http://127.0.0.1:5000")
 tools = client.load_toolset()
-tool_node = ToolNode(tools)
 
 prompt = """
   You're a helpful investment research assistant. 
   You can use the provided tools to search for companies, 
   people at companies, industries, and news articles from 2023.
-  Make sure to use prior tool outputs from the conversation to filter, e.g. by location, sentiment, etc.
+  Make sure to use prior tool outputs and memory from the conversation to 
+  lookup entities by id or 
+  filter, e.g. by location, sentiment, etc.
   or as inputs for subsequent operations. If needed use the tools that provide more detailed information 
   on articles or companies to get the information you need for filtering or sorting.
   Don't ask for confirmations from the user.
-  User: 
 """
 
 queries = [
     "What industries deal with neurological implants?",
-    "List 5 companies in from those industries with their description and filter afterwards by California.",
+    "List 5 companies in from those industries with their description and filter the list by California.",
     "Who is working at these companies?",
     "What were the news in January 2023 with positive sentiment? List top 5 articles.",
     "Summarize these articles.",
-    "Which 3 companies were mentioned by these articles?"
+    "Which 3 companies were mentioned by these articles?",
     "Who is working there as board members?",
 ]
 
 llm = ChatVertexAI(model_name="gemini-2.0-flash-001", streaming=True)
 
-# Core invocation of the model
-def _call_model(state: GraphsState):
-    messages = state["messages"]
-    # llm = ChatOpenAI( temperature=0.7, streaming=True, ).bind_tools(tools)
-
-#    llm = ChatVertexAI(model_name="gemini-2.0-flash-001", streaming=True)
-
-#    memory = MemorySaver()
-    # agent = create_react_agent(llm, tools, checkpointer=memory)
-
-    config = {"configurable": {"thread_id": "thread-1"}}
-
-#    inputs = {"messages": [("user", prompt + query)]}
-    # response = agent.invoke(messages, stream_mode="values", config=config)
-
-    response = llm.invoke(messages)
-    return {"messages": [response]}  # add the response to the messages using LangGraph reducer paradigm
-
-# Define the structure (nodes and directional edges between nodes) of the graph
-graph.add_edge(START, "modelNode")
-graph.add_node("tools", tool_node)
-graph.add_node("modelNode", _call_model)
-
-# Add conditional logic to determine the next step based on the state (to continue or to end)
-graph.add_conditional_edges(
-    "modelNode",
-    should_continue,  # This function will decide the flow of execution
-)
-graph.add_edge("tools", "modelNode")
-graph.add_edge("modelNode", "tools")
-
 memory = MemorySaver()
-# Compile the state graph into a runnable object
-# graph_runnable = graph.compile(checkpointer=memory)
 graph_runnable = create_react_agent(llm, tools, checkpointer=memory)
 
 # Function to invoke the compiled graph externally
@@ -183,22 +128,17 @@ def invoke_our_graph(st_messages, callables):
     if not isinstance(callables, list):
         raise TypeError("callables must be a list")
     # Invoke the graph with the current messages and callback configuration
-    # stream_mode="values"
-    return graph_runnable.invoke({"messages": st_messages}, config={"configurable": {"thread_id": "thread-1"}, "callbacks": callables})
+    return graph_runnable.invoke({"messages": st_messages}, stream_mode="values", config={"configurable": {"thread_id": "thread-1"}, "callbacks": callables})
 
 load_dotenv()
 
-st.title("Investment Research Agent - StreamLit 🤝 LangGraph 🤝 Gen AI Toolbox 🤝 Neo4j")
+st.title("Investment Research Agent")
+st.markdown("### StreamLit 🤝 LangGraph 🤝 Gen AI Toolbox 🤝 Neo4j")
 st.markdown("####  This is an investment research agent built with Google Gen AI Toolbox using a Neo4j Knowledge Graph")
-
-# st write magic
-# """
-# In this example, we're going to be using the official [`StreamlitCallbackHandler`](https://api.python.langchain.com/en/latest/callbacks/langchain_community.callbacks.streamlit.streamlit_callback_handler.StreamlitCallbackHandler.html) 
-# within [_LangGraph_](https://langchain-ai.github.io/langgraph/) by leveraging callbacks in our 
-# graph's [`RunnableConfig`](https://api.python.langchain.com/en/latest/runnables/langchain_core.runnables.config.RunnableConfig.html).
-
-# ---
-# """
+st.markdown("""
+            Learn more in the [blog post](https://medium.com/google-cloud/building-ai-agents-with-googles-gen-ai-toolbox-and-neo4j-knowledge-graphs-835c0cda3090)
+            and [Neo4j GenAI Ecosystem Pages](https://neo4j.com/labs/genai-ecosystem)
+            """)
 
 # Check if the API key is available as an environment variable
 if not os.getenv('GOOGLE_API_KEY'):
@@ -216,7 +156,7 @@ if "messages" not in st.session_state:
     # default initial message to render in message state
     st.session_state["messages"] = [
         SystemMessage(content=prompt),
-        AIMessage(content="How can I help you?")
+        AIMessage(content="How can I help you? You can research companies, articles, people.")
     ]
 
 # Loop through all messages in the session state and render them as a chat on every st.refresh mech
@@ -228,8 +168,11 @@ for msg in st.session_state.messages:
     if type(msg) == HumanMessage:
         st.chat_message("user").write(msg.content)
 
+question = st.selectbox("Questions", queries, index=None, placeholder="possible questions", label_visibility="hidden")
 # takes new input in chat box from user and invokes the graph
-if prompt := st.chat_input():
+prompt = st.chat_input()
+prompt = question or prompt
+if prompt:
     st.session_state.messages.append(HumanMessage(content=prompt))
     st.chat_message("user").write(prompt)
 
